@@ -1,6 +1,7 @@
 const { WebSocketServer } = require('ws');
 
-const wss = new WebSocketServer({ port: 8080 });
+const PORT = process.env.PORT || 8080;
+const wss = new WebSocketServer({ port: PORT });
 
 const MAX_PLAYERS = 6;
 const MAX_BOXES = 15;
@@ -20,7 +21,7 @@ const BASE_SPAWNS = {
 
 const rooms = new Map();
 
-console.log('Server started on port 8080');
+console.log(`Server started on port ${PORT}`);
 
 wss.on('connection', (ws) => {
     ws.id = Math.random().toString(36).substring(2, 9);
