@@ -5,7 +5,7 @@ const wss = new WebSocketServer({ port: PORT });
 
 const MAX_PLAYERS = 6;
 const MAX_BOXES = 15;
-const MAX_PLATES = 10;
+const MAX_PLATES = 8;
 const SPAWN_INTERVAL = 2000;
 const MIN_BOX_DISTANCE = 5.0;
 const BOX_SPEED = 1.5;
@@ -62,6 +62,28 @@ function handleMessage(ws, message) {
             break;
         case 'collect_box':
             handleBoxCollection(ws, message.box_id);
+            break;
+        case 'collect_income':
+            if (ws.roomId && rooms.has(ws.roomId)) {
+                const room = rooms.get(ws.roomId);
+                const baseId = room.bases.get(ws.id);
+                const plateIdx = message.plate_index - 1; // 0-based
+                
+                if (baseId && plateIdx >= 0 && plateIdx < MAX_PLATES) {
+                    const uncollectedPlates = room.uncollectedPlates.get(baseId);
+                    if (uncollectedPlates && uncollectedPlates[plateIdx] > 0) {
+                        const amount = uncollectedPlates[plateIdx];
+                        const currentBalance = room.balances.get(ws.id) || 0;
+                        const newBalance = currentBalance + amount;
+                        
+                        room.balances.set(ws.id, newBalance);
+                        uncollectedPlates[plateIdx] = 0;
+                        
+                        ws.send(JSON.stringify({ type: 'update_balance', balance: newBalance }));
+                        ws.send(JSON.stringify({ type: 'update_uncollected_plate', plate_index: message.plate_index, amount: 0 }));
+                    }
+                }
+            }
             break;
         default:
             console.log('Unknown message type:', message.type);
@@ -227,6 +249,46 @@ function startPhysicsLoop(roomId) {
     }, 50);
 }
 
+function startCrushLoop(roomId) {
+    const room = rooms.get(roomId);
+    if (!room || room.crushInterval) return;
+
+    room.crushInterval = setInterval(() => {
+        broadcastToRoom(null, { type: 'crush_plates' }, roomId);
+        
+        // Calculate income for each plate
+        for (const [baseId, plates] of room.basePlates.entries()) {
+            const uncollected = room.uncollectedPlates.get(baseId);
+            let updatedPlates = [];
+            
+            for (let i = 0; i < MAX_PLATES; i++) {
+                if (plates[i] !== null) {
+                    uncollected[i] += 5;
+                    updatedPlates.push({ plate_index: i + 1, amount: uncollected[i] });
+                }
+            }
+            
+            if (updatedPlates.length > 0) {
+                // Find owner of baseId
+                let ownerWs = null;
+                for (const player of room.players) {
+                    if (room.bases.get(player.id) === baseId) {
+                        ownerWs = player;
+                        break;
+                    }
+                }
+                
+                if (ownerWs && ownerWs.readyState === 1) {
+                    for (const u of updatedPlates) {
+                        ownerWs.send(JSON.stringify({ type: 'update_uncollected_plate', plate_index: u.plate_index, amount: u.amount }));
+                    }
+                }
+            }
+        }
+        
+    }, 1000); // 1 second interval for the crush animation
+}
+
 function joinRandomRoom(ws) {
     leaveRoom(ws);
 
@@ -245,17 +307,22 @@ function joinRandomRoom(ws) {
             bases: new Map(), 
             boxes: new Map(),
             basePlates: new Map(),
+            balances: new Map(),
+            uncollectedPlates: new Map(),
             max: MAX_PLAYERS,
             interval: null,
-            physicsInterval: null
+            physicsInterval: null,
+            crushInterval: null
         };
         for(let i=1; i<=MAX_PLAYERS; i++) {
             newRoom.basePlates.set(i, new Array(MAX_PLATES).fill(null));
+            newRoom.uncollectedPlates.set(i, new Array(MAX_PLATES).fill(0));
         }
         rooms.set(roomId, newRoom);
         
         startBoxSpawner(roomId);
         startPhysicsLoop(roomId);
+        startCrushLoop(roomId);
     }
 
     const room = rooms.get(roomId);
@@ -291,12 +358,17 @@ function joinRandomRoom(ws) {
     room.players.add(ws);
     ws.roomId = roomId;
 
+    const startBalance = room.balances.get(ws.id) || 0;
+    const startUncollectedPlates = room.uncollectedPlates.get(assignedBase) || new Array(MAX_PLATES).fill(0);
+
     console.log(`Client ${ws.id} joined room: ${roomId} at base ${assignedBase}`);
     ws.send(JSON.stringify({ 
         type: 'joined', 
         room_id: roomId, 
         self_id: ws.id,
         base: assignedBase,
+        balance: startBalance,
+        uncollected_plates: startUncollectedPlates,
         players: existingPlayers,
         boxes: currentBoxes,
         plated_boxes: currentPlatedBoxes
@@ -339,6 +411,7 @@ function leaveRoom(ws) {
         if (room.players.size === 0) {
             if (room.interval) clearInterval(room.interval);
             if (room.physicsInterval) clearInterval(room.physicsInterval);
+            if (room.crushInterval) clearInterval(room.crushInterval);
             rooms.delete(ws.roomId);
         }
         delete ws.roomId;
