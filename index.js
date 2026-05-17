@@ -48,14 +48,16 @@ function handleMessage(ws, message) {
             joinRandomRoom(ws);
             break;
         case 'update_position':
-            broadcastToRoom(ws, { 
-                type: 'player_moved', 
-                id: ws.id, 
-                pos: message.pos, 
-                rot: message.rot,
-                anim: message.anim,
-                anim_speed: message.anim_speed
-            });
+            if (ws.roomId && rooms.has(ws.roomId)) {
+                const room = rooms.get(ws.roomId);
+                room.playerStates.set(ws.id, {
+                    id: ws.id,
+                    pos: message.pos,
+                    rot: message.rot,
+                    anim: message.anim,
+                    anim_speed: message.anim_speed
+                });
+            }
             break;
         case 'send_message':
             broadcastToRoom(ws, { type: 'message', content: message.content, senderId: ws.id });
@@ -246,6 +248,12 @@ function startPhysicsLoop(roomId) {
         if (movedBoxes.length > 0) {
             broadcastToRoom(null, { type: 'boxes_moved', boxes: movedBoxes }, roomId);
         }
+        
+        if (room.playerStates.size > 0) {
+            const playersMoved = Array.from(room.playerStates.values());
+            broadcastToRoom(null, { type: 'players_moved', players: playersMoved }, roomId);
+            room.playerStates.clear();
+        }
     }, 50);
 }
 
@@ -309,6 +317,7 @@ function joinRandomRoom(ws) {
             basePlates: new Map(),
             balances: new Map(),
             uncollectedPlates: new Map(),
+            playerStates: new Map(),
             max: MAX_PLAYERS,
             interval: null,
             physicsInterval: null,
