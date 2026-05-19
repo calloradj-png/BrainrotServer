@@ -10,6 +10,12 @@ const SPAWN_INTERVAL = 2000;
 const MIN_BOX_DISTANCE = 5.0;
 const BOX_SPEED = 2.5;
 
+const BOX_CONFIG = [
+    { name: "Noobini Pizzanini", price: 25, income: 1, rarity: 0 },
+    { name: "Lirilli Larilla", price: 250, income: 5, rarity: 1 },
+    { name: "Gold Box", price: 1000, income: 25, rarity: 2 }
+];
+
 const BASE_SPAWNS = {
     1: { x: 24.0, z: 0.0 },
     2: { x: 12.0, z: 20.8 },
@@ -117,9 +123,22 @@ function handleBoxCollection(ws, boxId) {
                 return; // Base is full
             }
 
+            const box = room.boxes.get(boxId);
+            const boxPrice = BOX_CONFIG[box.type].price;
+            const currentBalance = room.balances.get(ws.id) || 0;
+
+            if (currentBalance < boxPrice) {
+                ws.send(JSON.stringify({ type: 'collection_failed', box_id: boxId, reason: 'insufficient_funds' }));
+                return;
+            }
+
             const target = BASE_SPAWNS[baseId];
             if (target) {
-                const box = room.boxes.get(boxId);
+                // Deduct balance
+                const newBalance = currentBalance - boxPrice;
+                room.balances.set(ws.id, newBalance);
+                ws.send(JSON.stringify({ type: 'update_balance', balance: newBalance }));
+
                 box.isMoving = true;
                 box.ownerId = ws.id;
                 box.targetX = target.x;
@@ -167,8 +186,59 @@ function startBoxSpawner(roomId) {
         if (bestCandidate && (room.boxes.size === 0 || maxMinDist >= MIN_BOX_DISTANCE)) {
             const boxId = Math.random().toString(36).substring(2, 7);
             const rotY = Math.random() * Math.PI * 2;
+            
+            // Count existing boxes by type to maintain balance
+            let typeCounts = new Array(BOX_CONFIG.length).fill(0);
+            for (const box of room.boxes.values()) {
+                typeCounts[box.type]++;
+            }
+
+            let boxType = -1;
+
+            // First priority: ensure at least one of each base box (rarity 0) exists
+            for (let i = 0; i < BOX_CONFIG.length; i++) {
+                if (BOX_CONFIG[i].rarity === 0 && typeCounts[i] === 0) {
+                    boxType = i;
+                    break;
+                }
+            }
+
+            if (boxType === -1) {
+                // Calculate dynamic weights
+                let totalWeight = 0;
+                let weights = [];
+                for (let i = 0; i < BOX_CONFIG.length; i++) {
+                    let rarity = BOX_CONFIG[i].rarity !== undefined ? BOX_CONFIG[i].rarity : 1;
+                    
+                    // Base weight according to rarity (0 = often, 1 = base, 2 = rare)
+                    let baseWeight = 10; 
+                    if (rarity === 0) baseWeight = 20;
+                    else if (rarity === 1) baseWeight = 10;
+                    else if (rarity === 2) baseWeight = 4;
+                    else if (rarity > 2) baseWeight = Math.max(1, 4 - (rarity - 2));
+
+                    // Reduce spawn chance proportionally to how many are already on the map
+                    let dynamicWeight = baseWeight / (1 + typeCounts[i]);
+                    weights.push(dynamicWeight);
+                    totalWeight += dynamicWeight;
+                }
+
+                // Weighted random
+                let rand = Math.random() * totalWeight;
+                let cumulative = 0;
+                for (let i = 0; i < weights.length; i++) {
+                    cumulative += weights[i];
+                    if (rand <= cumulative) {
+                        boxType = i;
+                        break;
+                    }
+                }
+            }
+            if (boxType === -1) boxType = 0; // Fallback
+
             const boxData = { 
                 id: boxId, 
+                type: boxType,
                 x: bestCandidate.x, 
                 z: bestCandidate.z, 
                 rotY, 
@@ -213,10 +283,11 @@ function startPhysicsLoop(roomId) {
                         room.boxes.delete(box.id);
                         
                         if (freePlateIdx !== -1) {
-                            plates[freePlateIdx] = { id: box.id };
+                            plates[freePlateIdx] = { id: box.id, type: box.type };
                             broadcastToRoom(null, { 
                                 type: 'box_plated', 
                                 box_id: box.id, 
+                                box_type: box.type,
                                 base_id: baseId, 
                                 plate_id: freePlateIdx + 1 
                             }, roomId);
@@ -271,7 +342,8 @@ function startCrushLoop(roomId) {
             
             for (let i = 0; i < MAX_PLATES; i++) {
                 if (plates[i] !== null) {
-                    uncollected[i] += 5;
+                    const income = BOX_CONFIG[plates[i].type].income;
+                    uncollected[i] += income;
                     updatedPlates.push({ plate_index: i + 1, amount: uncollected[i] });
                 }
             }
@@ -367,7 +439,10 @@ function joinRandomRoom(ws) {
     room.players.add(ws);
     ws.roomId = roomId;
 
-    const startBalance = room.balances.get(ws.id) || 0;
+    if (!room.balances.has(ws.id)) {
+        room.balances.set(ws.id, 100);
+    }
+    const startBalance = room.balances.get(ws.id);
     const startUncollectedPlates = room.uncollectedPlates.get(assignedBase) || new Array(MAX_PLATES).fill(0);
 
     console.log(`Client ${ws.id} joined room: ${roomId} at base ${assignedBase}`);
@@ -377,6 +452,7 @@ function joinRandomRoom(ws) {
         self_id: ws.id,
         base: assignedBase,
         balance: startBalance,
+        box_config: BOX_CONFIG,
         uncollected_plates: startUncollectedPlates,
         players: existingPlayers,
         boxes: currentBoxes,
