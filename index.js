@@ -8,7 +8,7 @@ const MAX_BOXES = 15;
 const MAX_PLATES = 8;
 const SPAWN_INTERVAL = 2000;
 const MIN_BOX_DISTANCE = 5.0;
-const BOX_SPEED = 1.5;
+const BOX_SPEED = 2.5;
 
 const BASE_SPAWNS = {
     1: { x: 24.0, z: 0.0 },
