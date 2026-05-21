@@ -12,8 +12,9 @@ const BOX_SPEED = 2.5;
 
 const BOX_CONFIG = [
     { name: "Noobini Pizzanini", price: 25, income: 1, rarity: 0 },
-    { name: "Lirilli Larilla", price: 250, income: 5, rarity: 1 },
-    { name: "Gold Box", price: 1000, income: 25, rarity: 2 }
+    { name: "Tim Cheese", price: 500, income: 5, rarity: 0 },
+    { name: "Pipi Kiwi", price: 1500, income: 13, rarity: 1 },
+    { name: "Trippi Troppi", price: 2000, income: 15, rarity: 1 }
 ];
 
 const BASE_SPAWNS = {
@@ -93,8 +94,292 @@ function handleMessage(ws, message) {
                 }
             }
             break;
+        case 'sell_box':
+            handleSellBox(ws, message.box_id);
+            break;
+        case 'take_box':
+            handleTakeBox(ws, message.box_id);
+            break;
+        case 'steal_box':
+            handleStealBox(ws, message.box_id);
+            break;
+        case 'auto_place_box':
+            handleAutoPlaceBox(ws);
+            break;
+        case 'place_box':
+            handlePlaceBox(ws, message.plate_id);
+            break;
         default:
             console.log('Unknown message type:', message.type);
+    }
+}
+
+function handleSellBox(ws, boxId) {
+    if (ws.roomId && rooms.has(ws.roomId)) {
+        const room = rooms.get(ws.roomId);
+        const baseId = room.bases.get(ws.id);
+        if (!baseId) return;
+
+        const plates = room.basePlates.get(baseId);
+        if (!plates) return;
+
+        let plateIdx = -1;
+        let boxType = null;
+        for (let i = 0; i < MAX_PLATES; i++) {
+            if (plates[i] && plates[i].id === boxId) {
+                plateIdx = i;
+                boxType = plates[i].type;
+                break;
+            }
+        }
+
+        if (plateIdx !== -1 && boxType !== null) {
+            const boxPrice = BOX_CONFIG[boxType].price;
+            const sellValue = Math.floor(boxPrice * 0.7);
+
+            const uncollectedPlates = room.uncollectedPlates.get(baseId);
+            let uncollectedAmount = 0;
+            if (uncollectedPlates && uncollectedPlates[plateIdx] > 0) {
+                uncollectedAmount = uncollectedPlates[plateIdx];
+                uncollectedPlates[plateIdx] = 0;
+            }
+
+            const currentBalance = room.balances.get(ws.id) || 0;
+            const newBalance = currentBalance + sellValue + uncollectedAmount;
+
+            room.balances.set(ws.id, newBalance);
+
+            ws.send(JSON.stringify({ type: 'update_balance', balance: newBalance }));
+            ws.send(JSON.stringify({ type: 'update_uncollected_plate', plate_index: plateIdx + 1, amount: 0 }));
+
+            plates[plateIdx] = null;
+            broadcastToRoom(null, { type: 'box_removed', box_id: boxId }, ws.roomId);
+        }
+    }
+}
+
+function handleTakeBox(ws, boxId) {
+    if (ws.roomId && rooms.has(ws.roomId)) {
+        const room = rooms.get(ws.roomId);
+        const baseId = room.bases.get(ws.id);
+        if (!baseId) return;
+
+        const plates = room.basePlates.get(baseId);
+        if (!plates) return;
+
+        let plateIdx = -1;
+        let targetBoxData = null;
+        for (let i = 0; i < MAX_PLATES; i++) {
+            if (plates[i] && plates[i].id === boxId) {
+                plateIdx = i;
+                targetBoxData = plates[i];
+                break;
+            }
+        }
+
+        if (plateIdx !== -1 && targetBoxData !== null) {
+            const uncollectedPlates = room.uncollectedPlates.get(baseId);
+            let targetUncollectedAmount = 0;
+            if (uncollectedPlates && uncollectedPlates[plateIdx] > 0) {
+                targetUncollectedAmount = uncollectedPlates[plateIdx];
+            }
+
+            const held = room.heldBoxes.get(ws.id);
+            if (held) {
+                plates[plateIdx] = held.box;
+                if (uncollectedPlates) uncollectedPlates[plateIdx] = held.balance;
+                
+                room.heldBoxes.set(ws.id, { box: targetBoxData, balance: targetUncollectedAmount });
+
+                broadcastToRoom(null, { 
+                    type: 'box_plated', 
+                    box_id: held.box.id, 
+                    box_type: held.box.type,
+                    base_id: baseId, 
+                    plate_id: plateIdx + 1,
+                    instant: true
+                }, ws.roomId);
+                
+                broadcastToRoom(null, { type: 'box_grabbed', box_id: targetBoxData.id, player_id: ws.id }, ws.roomId);
+                
+                ws.send(JSON.stringify({ type: 'update_uncollected_plate', plate_index: plateIdx + 1, amount: held.balance }));
+            } else {
+                plates[plateIdx] = null;
+                if (uncollectedPlates) uncollectedPlates[plateIdx] = 0;
+                
+                room.heldBoxes.set(ws.id, { box: targetBoxData, balance: targetUncollectedAmount });
+                
+                broadcastToRoom(null, { type: 'box_grabbed', box_id: targetBoxData.id, player_id: ws.id }, ws.roomId);
+                
+                ws.send(JSON.stringify({ type: 'update_uncollected_plate', plate_index: plateIdx + 1, amount: 0 }));
+            }
+        }
+    }
+}
+
+function handlePlaceBox(ws, plateId) {
+    if (ws.roomId && rooms.has(ws.roomId)) {
+        const room = rooms.get(ws.roomId);
+        const baseId = room.bases.get(ws.id);
+        if (!baseId) return;
+
+        const held = room.heldBoxes.get(ws.id);
+        if (!held) return;
+
+        const plates = room.basePlates.get(baseId);
+        if (!plates) return;
+        
+        const plateIdx = plateId - 1;
+        if (plateIdx < 0 || plateIdx >= MAX_PLATES) return;
+
+        if (plates[plateIdx] === null) {
+            plates[plateIdx] = held.box;
+            const uncollectedPlates = room.uncollectedPlates.get(baseId);
+            if (uncollectedPlates) {
+                uncollectedPlates[plateIdx] = held.balance;
+            }
+
+            room.heldBoxes.delete(ws.id);
+
+            broadcastToRoom(null, { 
+                type: 'box_plated', 
+                box_id: held.box.id, 
+                box_type: held.box.type,
+                base_id: baseId, 
+                plate_id: plateId,
+                instant: true
+            }, ws.roomId);
+            
+            broadcastToRoom(null, { type: 'box_dropped', player_id: ws.id }, ws.roomId);
+            
+            ws.send(JSON.stringify({ type: 'update_uncollected_plate', plate_index: plateId, amount: held.balance }));
+        }
+    }
+}
+
+function handleStealBox(ws, boxId) {
+    if (ws.roomId && rooms.has(ws.roomId)) {
+        const room = rooms.get(ws.roomId);
+        const myBaseId = room.bases.get(ws.id);
+        if (!myBaseId) return;
+
+        // Check if I already hold a box
+        if (room.heldBoxes.has(ws.id)) return;
+
+        // Check capacity
+        let count = 0;
+        const myPlates = room.basePlates.get(myBaseId);
+        if (myPlates) {
+            for (let i = 0; i < MAX_PLATES; i++) {
+                if (myPlates[i] !== null) count++;
+            }
+        }
+        for (const box of room.boxes.values()) {
+            if (box.isMoving && box.ownerId !== null && room.bases.get(box.ownerId) === myBaseId) {
+                count++;
+            }
+        }
+        for (const [playerId, held] of room.heldBoxes.entries()) {
+            if (room.bases.get(playerId) === myBaseId) {
+                count++;
+            }
+        }
+        if (count >= MAX_PLATES) return; // Base is full
+
+        // Find the box in any base EXCEPT mine
+        let victimBaseId = -1;
+        let plateIdx = -1;
+        let targetBoxData = null;
+
+        for (const [bId, plates] of room.basePlates.entries()) {
+            if (bId === myBaseId) continue;
+            for (let i = 0; i < MAX_PLATES; i++) {
+                if (plates[i] && plates[i].id === boxId) {
+                    victimBaseId = bId;
+                    plateIdx = i;
+                    targetBoxData = plates[i];
+                    break;
+                }
+            }
+            if (victimBaseId !== -1) break;
+        }
+
+        if (plateIdx !== -1 && targetBoxData !== null) {
+            // Remove from victim's plate
+            const plates = room.basePlates.get(victimBaseId);
+            plates[plateIdx] = null;
+            
+            const uncollectedPlates = room.uncollectedPlates.get(victimBaseId);
+            let targetUncollectedAmount = 0;
+            if (uncollectedPlates && uncollectedPlates[plateIdx] > 0) {
+                targetUncollectedAmount = uncollectedPlates[plateIdx];
+                uncollectedPlates[plateIdx] = 0;
+            }
+
+            // Tell the victim their box is gone and uncollected is 0
+            let victimWs = null;
+            for (const player of room.players) {
+                if (room.bases.get(player.id) === victimBaseId) {
+                    victimWs = player;
+                    break;
+                }
+            }
+            if (victimWs && victimWs.readyState === 1) {
+                victimWs.send(JSON.stringify({ type: 'update_uncollected_plate', plate_index: plateIdx + 1, amount: 0 }));
+            }
+
+            // Stealer holds it now
+            room.heldBoxes.set(ws.id, { box: targetBoxData, balance: targetUncollectedAmount });
+            
+            // Broadcast grab event to show box over head
+            broadcastToRoom(null, { type: 'box_grabbed', box_id: targetBoxData.id, player_id: ws.id }, ws.roomId);
+        }
+    }
+}
+
+function handleAutoPlaceBox(ws) {
+    if (ws.roomId && rooms.has(ws.roomId)) {
+        const room = rooms.get(ws.roomId);
+        const baseId = room.bases.get(ws.id);
+        if (!baseId) return;
+
+        const held = room.heldBoxes.get(ws.id);
+        if (!held) return; // Player is not holding anything
+
+        const plates = room.basePlates.get(baseId);
+        if (!plates) return;
+        
+        // Find a free plate
+        let plateIdx = -1;
+        for (let i = 0; i < MAX_PLATES; i++) {
+            if (plates[i] === null) {
+                plateIdx = i;
+                break;
+            }
+        }
+
+        if (plateIdx !== -1) {
+            plates[plateIdx] = held.box;
+            const uncollectedPlates = room.uncollectedPlates.get(baseId);
+            if (uncollectedPlates) {
+                uncollectedPlates[plateIdx] = held.balance;
+            }
+
+            room.heldBoxes.delete(ws.id);
+
+            broadcastToRoom(null, { 
+                type: 'box_plated', 
+                box_id: held.box.id, 
+                box_type: held.box.type,
+                base_id: baseId, 
+                plate_id: plateIdx + 1,
+                instant: false // Let it slide in or just use true
+            }, ws.roomId);
+            
+            broadcastToRoom(null, { type: 'box_dropped', player_id: ws.id }, ws.roomId);
+            
+            ws.send(JSON.stringify({ type: 'update_uncollected_plate', plate_index: plateIdx + 1, amount: held.balance }));
+        }
     }
 }
 
@@ -114,6 +399,11 @@ function handleBoxCollection(ws, boxId) {
             }
             for (const box of room.boxes.values()) {
                 if (box.isMoving && box.ownerId !== null && room.bases.get(box.ownerId) === baseId) {
+                    count++;
+                }
+            }
+            for (const [playerId, held] of room.heldBoxes.entries()) {
+                if (room.bases.get(playerId) === baseId) {
                     count++;
                 }
             }
@@ -387,6 +677,7 @@ function joinRandomRoom(ws) {
             bases: new Map(), 
             boxes: new Map(),
             basePlates: new Map(),
+            heldBoxes: new Map(),
             balances: new Map(),
             uncollectedPlates: new Map(),
             playerStates: new Map(),
